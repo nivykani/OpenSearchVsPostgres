@@ -1,0 +1,20 @@
+ARG OPENSEARCH_CONNECTOR_VERSION=3.1.1
+ 
+# --- Stage 1: build the connector from source ---
+FROM gradle:7.6-jdk17 AS builder
+ARG OPENSEARCH_CONNECTOR_VERSION
+ 
+RUN wget -q "https://github.com/Aiven-Open/opensearch-connector-for-apache-kafka/archive/refs/tags/v${OPENSEARCH_CONNECTOR_VERSION}.tar.gz" && \
+    tar -xzf "v${OPENSEARCH_CONNECTOR_VERSION}.tar.gz" && \
+    cd "opensearch-connector-for-apache-kafka-${OPENSEARCH_CONNECTOR_VERSION}" && \
+    gradle installDist --no-daemon
+ 
+# --- Stage 2: the actual Kafka Connect image we run ---
+FROM debezium/connect:2.7.3.Final
+ARG OPENSEARCH_CONNECTOR_VERSION
+ 
+USER root
+COPY --from=builder \
+    /home/gradle/opensearch-connector-for-apache-kafka-${OPENSEARCH_CONNECTOR_VERSION}/build/install/opensearch-connector-for-apache-kafka/ \
+    /kafka/connect/opensearch-connector-for-apache-kafka/
+USER kafka

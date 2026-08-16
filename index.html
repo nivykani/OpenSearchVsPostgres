@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Search Race — Postgres vs. OpenSearch</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&family=Nunito:wght@600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #F7F6F2;
+    --panel: #FFFFFF;
+    --panel-border: #E4E1D8;
+    --text: #262420;
+    --text-muted: #7A7669;
+    --pg: #2F6690;
+    --pg-dim: #DCE7EF;
+    --os: #C97A1A;
+    --os-dim: #F5E2C8;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ink);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    min-height: 100vh;
+  }
+
+  .wrap {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 64px 24px 96px;
+  }
+
+  header {
+    text-align: center;
+    margin-bottom: 40px;
+  }
+
+  h1 {
+    font-family: 'Fraunces', serif;
+    font-weight: 600;
+    font-size: clamp(32px, 5vw, 48px);
+    letter-spacing: -0.01em;
+    margin: 0 0 12px;
+  }
+
+  h1 span.pg { color: var(--pg); }
+  h1 span.os { color: var(--os); }
+
+  .subhead {
+    color: var(--text-muted);
+    font-size: 16px;
+    max-width: 480px;
+    margin: 0 auto;
+    line-height: 1.5;
+  }
+
+  .search-box {
+    margin: 40px auto 8px;
+    max-width: 560px;
+    position: relative;
+  }
+
+  .search-box input {
+    width: 100%;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 16px 20px;
+    font-size: 17px;
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    outline: none;
+    box-shadow: 0 1px 3px rgba(38, 36, 32, 0.06);
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+
+  .search-box input:focus {
+    border-color: var(--pg);
+    box-shadow: 0 2px 8px rgba(47, 102, 144, 0.12);
+  }
+
+  .search-box input::placeholder {
+    color: var(--text-muted);
+  }
+
+  .hint {
+    text-align: center;
+    color: var(--text-muted);
+    font-family: 'Nunito', sans-serif;
+    font-weight: 700;
+    font-size: 15px;
+    margin-bottom: 48px;
+    min-height: 18px;
+  }
+
+  .race {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+
+  @media (max-width: 640px) {
+    .race { grid-template-columns: 1fr; }
+  }
+
+  .lane {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 14px;
+    padding: 22px 20px 20px;
+    display: flex;
+    flex-direction: column;
+    min-height: 200px;
+    box-shadow: 0 1px 3px rgba(38, 36, 32, 0.05);
+  }
+
+  .lane-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 4px;
+  }
+
+  .lane-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .lane.pg .lane-title { color: var(--pg); }
+  .lane.os .lane-title { color: var(--os); }
+
+  .lane-time {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+
+  .track {
+    height: 6px;
+    border-radius: 4px;
+    background: var(--panel-border);
+    overflow: hidden;
+    margin: 12px 0 18px;
+  }
+
+  .lane.pg .track-fill { background: var(--pg); }
+  .lane.os .track-fill { background: var(--os); }
+
+  .track-fill {
+    height: 100%;
+    width: 0%;
+    border-radius: 4px;
+    transition: width 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .track.loading .track-fill {
+    width: 40%;
+    animation: sweep 1.1s ease-in-out infinite;
+  }
+
+  @keyframes sweep {
+    0%   { transform: translateX(-120%); }
+    100% { transform: translateX(280%); }
+  }
+
+  .results {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    overflow-y: auto;
+    max-height: 480px;
+    padding-right: 4px;
+  }
+
+  .result {
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+
+  .result:last-child { border-bottom: none; }
+
+  .result-title {
+    font-size: 14.5px;
+    font-weight: 500;
+    line-height: 1.35;
+    margin-bottom: 3px;
+  }
+
+  .result-meta {
+    font-size: 12.5px;
+    color: var(--text-muted);
+  }
+
+  .empty {
+    color: var(--text-muted);
+    font-size: 14px;
+    font-style: italic;
+    margin-top: 8px;
+  }
+
+  .placeholder {
+    color: var(--text-muted);
+    font-size: 14px;
+    margin-top: 8px;
+  }
+
+  .skeleton {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .skel-line {
+    height: 14px;
+    border-radius: 4px;
+    background: var(--panel-border);
+    animation: pulse 1.3s ease-in-out infinite;
+  }
+
+  .skel-line:nth-child(2) { animation-delay: 0.1s; width: 85%; }
+  .skel-line:nth-child(3) { animation-delay: 0.2s; width: 70%; }
+  .skel-line:nth-child(4) { animation-delay: 0.3s; width: 90%; }
+  .skel-line:nth-child(5) { animation-delay: 0.4s; width: 60%; }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 0.35; }
+    50% { opacity: 0.7; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .track.loading .track-fill { animation: none; width: 40%; }
+    .skel-line { animation: none; opacity: 0.5; }
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1><span class="pg">Postgres</span> vs. <span class="os">OpenSearch</span></h1>
+      <p class="subhead">Same query, same data, two engines. <br> Which one will search through a database of books faster?</p>
+    </header>
+
+    <div class="search-box">
+      <input type="text" id="query" placeholder="Try typing “shakespeare”, “tolkien”, or a title..." autocomplete="off" autofocus>
+    </div>
+    <div class="hint" id="hint">&nbsp;</div>
+
+    <div class="race">
+      <div class="lane pg" id="lane-pg">
+        <div class="lane-head">
+          <span class="lane-title">Postgres · LIKE scan</span>
+          <span class="lane-time" id="pg-time">—</span>
+        </div>
+        <div class="track" id="pg-track"><div class="track-fill"></div></div>
+        <div id="pg-body"><div class="placeholder">Results will appear here.</div></div>
+      </div>
+
+      <div class="lane os" id="lane-os">
+        <div class="lane-head">
+          <span class="lane-title">OpenSearch · indexed</span>
+          <span class="lane-time" id="os-time">—</span>
+        </div>
+        <div class="track" id="os-track"><div class="track-fill"></div></div>
+        <div id="os-body"><div class="placeholder">Results will appear here.</div></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = "http://localhost:8000";
+    const input = document.getElementById("query");
+    const hint = document.getElementById("hint");
+
+    const pgTrack = document.getElementById("pg-track");
+    const osTrack = document.getElementById("os-track");
+    const pgBody = document.getElementById("pg-body");
+    const osBody = document.getElementById("os-body");
+    const pgTime = document.getElementById("pg-time");
+    const osTime = document.getElementById("os-time");
+
+    let debounceHandle = null;
+    let requestSeq = 0; // guards against an older, slower response overwriting a newer one
+
+    function skeletonHTML() {
+      return `<div class="skeleton">
+        <div class="skel-line"></div>
+        <div class="skel-line"></div>
+        <div class="skel-line"></div>
+        <div class="skel-line"></div>
+        <div class="skel-line"></div>
+      </div>`;
+    }
+
+    function resultRow(item) {
+      const authors = (item.author_names || []).join(", ") || "Unknown author";
+      const year = item.first_publish_year ? ` · ${item.first_publish_year}` : "";
+      const url = `https://openlibrary.org/works/${item.id}`;
+      return `<div class="result">
+        <div class="result-title"><a href="${url}" target="_blank" rel="noopener" style="color:inherit; text-decoration:none;">${escapeHTML(item.title)}</a></div>
+        <div class="result-meta">${escapeHTML(authors)}${year}</div>
+      </div>`;
+    }
+
+    function escapeHTML(str) {
+      const div = document.createElement("div");
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    function renderResults(container, items) {
+      if (!items || items.length === 0) {
+        container.innerHTML = `<div class="empty">No matches.</div>`;
+        return;
+      }
+      container.innerHTML = items.map(resultRow).join("");
+    }
+
+    // Maps a millisecond time onto a 5%-100% bar width on a log scale, so
+    // both a 50ms and a 23,000ms result are visually legible on the same
+    // track rather than one being an invisible sliver.
+    function timeToWidthPct(ms) {
+      const clamped = Math.max(ms, 1);
+      const pct = 12 + (Math.log10(clamped) / Math.log10(30000)) * 88;
+      return Math.min(Math.max(pct, 6), 100);
+    }
+
+    function setLoading() {
+      pgTrack.classList.add("loading");
+      osTrack.classList.add("loading");
+      pgTrack.querySelector(".track-fill").style.width = "";
+      osTrack.querySelector(".track-fill").style.width = "";
+      pgBody.innerHTML = skeletonHTML();
+      osBody.innerHTML = skeletonHTML();
+      pgTime.textContent = "…";
+      osTime.textContent = "…";
+      hint.textContent = "racing both engines…";
+    }
+
+    function clearLoading() {
+      pgTrack.classList.remove("loading");
+      osTrack.classList.remove("loading");
+    }
+
+    function reset() {
+      clearLoading();
+      pgTrack.querySelector(".track-fill").style.width = "0%";
+      osTrack.querySelector(".track-fill").style.width = "0%";
+      pgBody.innerHTML = `<div class="placeholder">Results will appear here.</div>`;
+      osBody.innerHTML = `<div class="placeholder">Results will appear here.</div>`;
+      pgTime.textContent = "—";
+      osTime.textContent = "—";
+      hint.innerHTML = "&nbsp;";
+    }
+
+    async function runSearch(q) {
+      const mySeq = ++requestSeq;
+      setLoading();
+
+      let data;
+      let res;
+      try {
+        // Deliberately no AbortController/timeout here -- some queries
+        // (an unindexed sequential scan with no early-exit match) can
+        // legitimately take many seconds, and that slowness is the point
+        // of the demo, not a failure state to cut off.
+        res = await fetch(`${API_BASE}/search?q=${encodeURIComponent(q)}`);
+      } catch (err) {
+        if (mySeq !== requestSeq) return; // a newer search superseded this one
+        clearLoading();
+        hint.textContent = "couldn't reach the API; is it running on :8000?";
+        pgBody.innerHTML = `<div class="empty">Request failed.</div>`;
+        osBody.innerHTML = `<div class="empty">Request failed.</div>`;
+        return;
+      }
+
+      if (mySeq !== requestSeq) return; // a newer search already started; drop this stale result
+
+      if (res.status === 429) {
+        clearLoading();
+        hint.textContent = "slow down please (too many searches too fast)";
+        pgBody.innerHTML = `<div class="empty">Rate limited. Try again in a moment.</div>`;
+        osBody.innerHTML = `<div class="empty">Rate limited. Try again in a moment.</div>`;
+        return;
+      }
+
+      if (!res.ok) {
+        clearLoading();
+        hint.textContent = "something went wrong on the server";
+        pgBody.innerHTML = `<div class="empty">Request failed.</div>`;
+        osBody.innerHTML = `<div class="empty">Request failed.</div>`;
+        return;
+      }
+
+      data = await res.json();
+
+      clearLoading();
+
+      pgTrack.querySelector(".track-fill").style.width = timeToWidthPct(data.postgres_time_ms) + "%";
+      osTrack.querySelector(".track-fill").style.width = timeToWidthPct(data.opensearch_time_ms) + "%";
+      pgTime.textContent = `${data.postgres_time_ms.toFixed(1)} ms`;
+      osTime.textContent = `${data.opensearch_time_ms.toFixed(1)} ms`;
+
+      renderResults(pgBody, data.postgres_results);
+      renderResults(osBody, data.opensearch_results);
+
+      const faster = data.opensearch_time_ms < data.postgres_time_ms ? "OpenSearch" : "Postgres";
+      const fasterColor = faster === "OpenSearch" ? "var(--os)" : "var(--pg)";
+      const ratio = Math.max(data.postgres_time_ms, data.opensearch_time_ms) /
+                    Math.max(Math.min(data.postgres_time_ms, data.opensearch_time_ms), 0.01);
+      hint.innerHTML = `<span style="color:${fasterColor}">${faster}</span> won this round: ${ratio.toFixed(1)}× faster`;
+    }
+
+    input.addEventListener("input", () => {
+      const q = input.value.trim();
+      clearTimeout(debounceHandle);
+      if (!q) {
+        requestSeq++; // invalidate any in-flight request
+        reset();
+        return;
+      }
+      debounceHandle = setTimeout(() => runSearch(q), 350);
+    });
+  </script>
+</body>
+</html>

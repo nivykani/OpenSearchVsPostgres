@@ -1,0 +1,41 @@
+# --- Secrets & credentials -- never commit these ---
+*.pem
+*.key
+*.crt
+.env
+.env.*
+postgres_ca.pem
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# --- Data files (large, regenerated from scripts, not source) ---
+*.csv
+*.gz
+chunks_raw/
+chunks_final/
+header.csv
+
+# --- Local dataset dumps (Open Library bulk downloads) ---
+works.gz
+authors.gz
+ratings.gz
+works_sample.gz
+authors_sample.gz
+
+# --- Cloudflare Workers experiment leftovers ---
+.venv-workers/
+old-firefly-23cf/
+node_modules/
+.wrangler/
+
+# --- macOS ---
+.DS_Store
+
+# --- Editor/IDE ---
+.vscode/
+.idea/

@@ -1,0 +1,79 @@
+version: "3.8"
+
+services:
+  # --- Coordination for the Kafka broker ---
+  zookeeper:
+    image: debezium/zookeeper:2.7.3.Final
+    ports:
+      - "2181:2181"
+      - "2888:2888"
+      - "3888:3888"
+
+  # --- The Kafka broker itself. Every CDC event Debezium reads
+  #     ends up written to a Kafka topic here. ---
+  kafka:
+    image: quay.io/debezium/kafka:2.7.3.Final
+    ports:
+      - "9092:9092"
+    environment:
+      ZOOKEEPER_CONNECT: zookeeper:2181
+    depends_on:
+      - zookeeper
+
+  # --- Postgres, configured to be CDC-readable ---
+  postgres:
+    image: debezium/postgres:16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: bookdb
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  # --- Kafka Connect, with the Debezium Postgres connector plugin
+  #     pre-installed (that's what makes this image different from
+  #     a vanilla Kafka Connect image). You POST connector configs
+  #     to its REST API to actually start CDC. ---
+  connect:
+    build:
+      context: .
+      dockerfile: Dockerfile.connect
+      args:
+        OPENSEARCH_CONNECTOR_VERSION: "3.1.1"
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: 1
+      CONFIG_STORAGE_TOPIC: connect_configs
+      OFFSET_STORAGE_TOPIC: connect_offsets
+      STATUS_STORAGE_TOPIC: connect_statuses
+    depends_on:
+      - kafka
+      - postgres
+      - opensearch
+  
+  opensearch:
+    image: opensearchproject/opensearch:3
+    container_name: opensearch
+    environment:
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - "DISABLE_SECURITY_PLUGIN=true"
+      - "OPENSEARCH_INITIAL_ADMIN_PASSWORD=uNpReDicTaBLE!"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200" # REST API
+    volumes:
+      - opensearch-data1:/usr/share/opensearch/data # Creates volume called opensearch-data1 and mounts it to the container
+    
+
+volumes:
+  pgdata:
+  opensearch-data1:
