@@ -14,6 +14,8 @@ Run locally with:
 
 import asyncio
 import json
+import os
+import ssl
 import time
 from contextlib import asynccontextmanager
 
@@ -26,9 +28,18 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-OPENSEARCH_HOST = "http://localhost:9200"
+# --- Aiven connection details ---
+PG_HOST = "search-postgres-searchproject.b.aivencloud.com"
+PG_PORT = 25662
+PG_USER = "avnadmin"
+PG_DATABASE = "defaultdb"
+PG_CA_CERT_PATH = os.environ.get("PG_CA_CERT_PATH", "/etc/secrets/postgres_ca.pem")
+
+OPENSEARCH_HOST = "search-opensearch-searchproject.c.aivencloud.com"
+OPENSEARCH_PORT = 25662
+OPENSEARCH_USER = "avnadmin"
 OPENSEARCH_INDEX = "bookdb.public.works"
-POSTGRES_DSN = "postgresql://postgres:postgres@localhost:5432/bookdb"
+
 RESULT_LIMIT = 20
 
 
@@ -53,8 +64,27 @@ async def lifespan(app: FastAPI):
     # Created once at startup, reused for every request -- this is the
     # connection pooling you asked about. app.state is FastAPI's sanctioned
     # place to stash long-lived objects that request handlers need to reach.
-    app.state.pg_pool = await asyncpg.create_pool(POSTGRES_DSN, min_size=2, max_size=10)
-    app.state.os_client = AsyncOpenSearch(hosts=[OPENSEARCH_HOST])
+    #
+    # Credentials come from environment variables, never hardcoded --
+    # set PG_PASSWORD and OPENSEARCH_PASSWORD before starting the app.
+    pg_ssl_context = ssl.create_default_context(cafile=PG_CA_CERT_PATH)
+
+    app.state.pg_pool = await asyncpg.create_pool(
+        host=PG_HOST,
+        port=PG_PORT,
+        user=PG_USER,
+        password=os.environ["PG_PASSWORD"],
+        database=PG_DATABASE,
+        ssl=pg_ssl_context,
+        min_size=2,
+        max_size=10,
+    )
+    app.state.os_client = AsyncOpenSearch(
+        hosts=[{"host": OPENSEARCH_HOST, "port": OPENSEARCH_PORT}],
+        http_auth=(OPENSEARCH_USER, os.environ["OPENSEARCH_PASSWORD"]),
+        use_ssl=True,
+        verify_certs=True,
+    )
     yield
     await app.state.pg_pool.close()
     await app.state.os_client.close()
