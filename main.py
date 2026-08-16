@@ -101,11 +101,11 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Local dev only -- tighten this before deploying (Phase 5).
+# Locked to the actual production frontend origin.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origins=["https://nivykani.com", "https://www.nivykani.com"],
+    allow_methods=["GET"],
     allow_headers=["*"],
 )
 
