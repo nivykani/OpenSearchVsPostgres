@@ -1,18 +1,15 @@
 """
 Search comparison API.
 
-One endpoint, /search, that:
-  - queries OpenSearch (edge n-gram match on title/subtitle/author_names)
-  - queries Postgres (naive LIKE '%term%' on the same fields)
-  - runs both concurrently
-  - times each independently, around just the query call itself
-  - returns both result sets + both timings in one response
+Two independent endpoints -- /search/postgres and /search/opensearch --
+rather than one combined endpoint. This lets the frontend fire both
+requests at once and render whichever finishes first immediately, instead
+of waiting for the slower of the two before showing anything.
 
 Run locally with:
   uvicorn main:app --reload --port 8000
 """
 
-import asyncio
 import json
 import os
 import ssl
@@ -51,12 +48,15 @@ class WorkResult(BaseModel):
     first_publish_year: int | None
 
 
-class SearchResponse(BaseModel):
-    opensearch_results: list[WorkResult]
-    opensearch_time_ms: float
-    postgres_results: list[WorkResult]
-    postgres_time_ms: float
-    postgres_explain: dict
+class OpenSearchResponse(BaseModel):
+    results: list[WorkResult]
+    time_ms: float
+
+
+class PostgresResponse(BaseModel):
+    results: list[WorkResult]
+    time_ms: float
+    explain: dict
 
 
 @asynccontextmanager
@@ -92,11 +92,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# Rate limiting: keyed by client IP. This matters more than it might for a
-# typical endpoint, because a slow unindexed Postgres scan (measured at
-# ~23s in testing) can hold a pooled connection open for a long time --
-# a handful of rapid repeat requests from one client could exhaust the
-# whole pool (max_size=10) and degrade the app for every other visitor.
+# Rate limiting: keyed by client IP, applied per endpoint below. This
+# matters more than it might for a typical endpoint, because a slow
+# unindexed Postgres scan (measured at ~23s in testing) can hold a pooled
+# connection open for a long time -- a handful of rapid repeat requests
+# from one client could exhaust the whole pool (max_size=10) and degrade
+# the app for every other visitor. Each endpoint now gets its own limit
+# bucket, since a client could otherwise hammer just the Postgres route
+# while staying under a shared limit.
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -108,62 +111,6 @@ app.add_middleware(
     allow_methods=["GET"],
     allow_headers=["*"],
 )
-
-
-async def query_opensearch(client: AsyncOpenSearch, term: str) -> tuple[list[WorkResult], float]:
-    body = {
-        "query": {
-            "multi_match": {
-                "query": term,
-                "fields": ["title", "subtitle", "author_names"],
-            }
-        },
-        "size": RESULT_LIMIT,
-    }
-
-    start = time.perf_counter()
-    response = await client.search(index=OPENSEARCH_INDEX, body=body)
-    elapsed_ms = (time.perf_counter() - start) * 1000
-
-    results = [
-        WorkResult(
-            id=hit["_source"]["id"],
-            title=hit["_source"]["title"],
-            subtitle=hit["_source"].get("subtitle"),
-            author_names=hit["_source"].get("author_names") or [],
-            first_publish_year=hit["_source"].get("first_publish_year"),
-        )
-        for hit in response["hits"]["hits"]
-    ]
-    return results, elapsed_ms
-
-
-async def query_postgres(pool: asyncpg.Pool, term: str) -> list[WorkResult]:
-    sql = """
-        SELECT id, title, subtitle, author_names, first_publish_year
-        FROM works
-        WHERE title ILIKE '%' || $1 || '%'
-           OR subtitle ILIKE '%' || $1 || '%'
-           OR EXISTS (
-               SELECT 1 FROM unnest(author_names) AS a
-               WHERE a ILIKE '%' || $1 || '%'
-           )
-        LIMIT $2
-    """
-
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(sql, term, RESULT_LIMIT)
-
-    return [
-        WorkResult(
-            id=row["id"],
-            title=row["title"],
-            subtitle=row["subtitle"],
-            author_names=list(row["author_names"] or []),
-            first_publish_year=row["first_publish_year"],
-        )
-        for row in rows
-    ]
 
 
 def find_scan_node(plan_node: dict) -> dict:
@@ -184,18 +131,41 @@ def find_scan_node(plan_node: dict) -> dict:
     return plan_node  # fall back to whatever we started with
 
 
-async def explain_postgres(pool: asyncpg.Pool, term: str) -> dict:
-    """
-    Runs the same query wrapped in EXPLAIN (ANALYZE, FORMAT JSON) -- this
-    actually executes the query a second time, instrumented, to get
-    Postgres's real internal execution time and the query plan it chose
-    (confirming, not just asserting, that this is a sequential scan).
-    Kept as a separate call from query_postgres rather than folded in,
-    since it's a diagnostic/demo feature, not something every keystroke
-    needs to pay for.
-    """
+@app.get("/search/opensearch", response_model=OpenSearchResponse)
+@limiter.limit("20/minute")
+async def search_opensearch(request: Request, q: str = Query(..., min_length=1)):
+    body = {
+        "query": {
+            "multi_match": {
+                "query": q,
+                "fields": ["title", "subtitle", "author_names"],
+            }
+        },
+        "size": RESULT_LIMIT,
+    }
+
+    start = time.perf_counter()
+    response = await app.state.os_client.search(index=OPENSEARCH_INDEX, body=body)
+    elapsed_ms = (time.perf_counter() - start) * 1000
+
+    results = [
+        WorkResult(
+            id=hit["_source"]["id"],
+            title=hit["_source"]["title"],
+            subtitle=hit["_source"].get("subtitle"),
+            author_names=hit["_source"].get("author_names") or [],
+            first_publish_year=hit["_source"].get("first_publish_year"),
+        )
+        for hit in response["hits"]["hits"]
+    ]
+
+    return OpenSearchResponse(results=results, time_ms=elapsed_ms)
+
+
+@app.get("/search/postgres", response_model=PostgresResponse)
+@limiter.limit("20/minute")
+async def search_postgres(request: Request, q: str = Query(..., min_length=1)):
     sql = """
-        EXPLAIN (ANALYZE, FORMAT JSON)
         SELECT id, title, subtitle, author_names, first_publish_year
         FROM works
         WHERE title ILIKE '%' || $1 || '%'
@@ -206,15 +176,28 @@ async def explain_postgres(pool: asyncpg.Pool, term: str) -> dict:
            )
         LIMIT $2
     """
-    async with pool.acquire() as conn:
-        row = await conn.fetchval(sql, term, RESULT_LIMIT)
+    explain_sql = "EXPLAIN (ANALYZE, FORMAT JSON)\n" + sql
+
+    async with app.state.pg_pool.acquire() as conn:
+        rows = await conn.fetch(sql, q, RESULT_LIMIT)
+        explain_row = await conn.fetchval(explain_sql, q, RESULT_LIMIT)
+
+    results = [
+        WorkResult(
+            id=row["id"],
+            title=row["title"],
+            subtitle=row["subtitle"],
+            author_names=list(row["author_names"] or []),
+            first_publish_year=row["first_publish_year"],
+        )
+        for row in rows
+    ]
 
     # asyncpg returns the EXPLAIN JSON output as a JSON-encoded string;
     # it's a list containing one plan object.
-    plan = json.loads(row)[0]
+    plan = json.loads(explain_row)[0]
     scan_node = find_scan_node(plan["Plan"])
-
-    return {
+    explain = {
         "top_node_type": plan["Plan"].get("Node Type"),
         "scan_node_type": scan_node.get("Node Type"),
         "execution_time_ms": plan.get("Execution Time"),
@@ -222,20 +205,8 @@ async def explain_postgres(pool: asyncpg.Pool, term: str) -> dict:
         "actual_rows": plan["Plan"].get("Actual Rows"),
     }
 
-
-@app.get("/search", response_model=SearchResponse)
-@limiter.limit("20/minute")
-async def search(request: Request, q: str = Query(..., min_length=1)):
-    (os_results, os_time), pg_results, pg_explain = await asyncio.gather(
-        query_opensearch(app.state.os_client, q),
-        query_postgres(app.state.pg_pool, q),
-        explain_postgres(app.state.pg_pool, q),
-    )
-
-    return SearchResponse(
-        opensearch_results=os_results,
-        opensearch_time_ms=os_time,
-        postgres_results=pg_results,
-        postgres_time_ms=pg_explain["execution_time_ms"],
-        postgres_explain=pg_explain,
+    return PostgresResponse(
+        results=results,
+        time_ms=explain["execution_time_ms"],
+        explain=explain,
     )
